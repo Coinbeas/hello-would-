@@ -1,0 +1,2 @@
+# hello-would-
+Flask==3.0.3 Flask-Login==0.6.3 Flask-WTF==1.2.1 Werkzeug==3.0.3 anthropic==0.29.0 python-dotenv==1.0.1
