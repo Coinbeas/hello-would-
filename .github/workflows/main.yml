@@ -1,0 +1,410 @@
+import { useState, useRef, useEffect } from "react";
+
+const GREEN = "#00ff41";
+const DIM_GREEN = "#00aa2a";
+const DARK = "#0a0f0a";
+const PANEL = "#0d140d";
+const BORDER = "#1a2e1a";
+
+const term = (text, color = GREEN) => (
+  <span style={{ color }}>{text}</span>
+);
+
+function TerminalLine({ prefix = ">", text, color = GREEN, dim = false }) {
+  return (
+    <div style={{ fontFamily: "monospace", fontSize: 13, lineHeight: "1.7", color: dim ? DIM_GREEN : color }}>
+      <span style={{ color: DIM_GREEN }}>{prefix} </span>
+      {text}
+    </div>
+  );
+}
+
+function Cursor() {
+  const [vis, setVis] = useState(true);
+  useEffect(() => {
+    const t = setInterval(() => setVis(v => !v), 530);
+    return () => clearInterval(t);
+  }, []);
+  return <span style={{ color: GREEN, opacity: vis ? 1 : 0 }}>█</span>;
+}
+
+function MarkdownPreview({ md }) {
+  // Simple markdown → styled JSX renderer
+  const lines = md.split("\n");
+  return (
+    <div style={{ fontFamily: "monospace", fontSize: 13, lineHeight: 1.8, color: GREEN, whiteSpace: "pre-wrap" }}>
+      {lines.map((line, i) => {
+        if (line.startsWith("# ")) return <div key={i} style={{ color: "#fff", fontWeight: "bold", fontSize: 18, marginTop: 12 }}>{line.slice(2)}</div>;
+        if (line.startsWith("## ")) return <div key={i} style={{ color: GREEN, fontWeight: "bold", fontSize: 15, marginTop: 10, borderBottom: `1px solid ${BORDER}`, paddingBottom: 2 }}>{line.slice(3)}</div>;
+        if (line.startsWith("### ")) return <div key={i} style={{ color: DIM_GREEN, fontWeight: "bold", fontSize: 13, marginTop: 8 }}>{line.slice(4)}</div>;
+        if (line.startsWith("```")) return <div key={i} style={{ color: "#555" }}>{line}</div>;
+        if (line.startsWith("- ") || line.startsWith("* ")) return <div key={i} style={{ color: "#aaffaa" }}>{"  • " + line.slice(2)}</div>;
+        if (line.startsWith("> ")) return <div key={i} style={{ color: DIM_GREEN, borderLeft: `2px solid ${DIM_GREEN}`, paddingLeft: 8 }}>{line.slice(2)}</div>;
+        if (line.trim() === "") return <div key={i} style={{ height: 6 }} />;
+        return <div key={i}>{line}</div>;
+      })}
+    </div>
+  );
+}
+
+export default function GitReadmeAI() {
+  const [url, setUrl] = useState("");
+  const [log, setLog] = useState([{ text: "GitReadme AI v1.0 — terminal edition", dim: false }]);
+  const [readme, setReadme] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [tab, setTab] = useState("raw"); // raw | preview
+  const logRef = useRef(null);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [log]);
+
+  const addLog = (text, dim = false) => setLog(l => [...l, { text, dim }]);
+
+  const parseGithubUrl = (u) => {
+    const m = u.match(/github\.com\/([^/]+)\/([^/]+)/);
+    if (!m) return null;
+    return { owner: m[1], repo: m[2].replace(/\.git$/, "") };
+  };
+
+  const fetchGithubData = async (owner, repo) => {
+    const headers = { Accept: "application/vnd.github+json" };
+    const [repoRes, contentsRes, languagesRes] = await Promise.all([
+      fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers }),
+      fetch(`https://api.github.com/repos/${owner}/${repo}/contents`, { headers }),
+      fetch(`https://api.github.com/repos/${owner}/${repo}/languages`, { headers }),
+    ]);
+
+    if (!repoRes.ok) throw new Error(`Repo not found or private (${repoRes.status})`);
+
+    const repoData = await repoRes.json();
+    const contents = contentsRes.ok ? await contentsRes.json() : [];
+    const languages = languagesRes.ok ? await languagesRes.json() : {};
+
+    // Try to fetch existing README
+    let existingReadme = "";
+    const readmeFile = Array.isArray(contents) && contents.find(f => f.name.toLowerCase() === "readme.md");
+    if (readmeFile) {
+      try {
+        const r = await fetch(readmeFile.download_url);
+        existingReadme = await r.text();
+      } catch (_) {}
+    }
+
+    return { repoData, contents: Array.isArray(contents) ? contents : [], languages, existingReadme };
+  };
+
+  const generate = async () => {
+    if (!url.trim() || loading) return;
+    const parsed = parseGithubUrl(url.trim());
+    if (!parsed) {
+      addLog("ERROR: Invalid GitHub URL format", false);
+      return;
+    }
+
+    setLoading(true);
+    setReadme("");
+    setLog([{ text: "GitReadme AI v1.0 — terminal edition", dim: false }]);
+
+    const { owner, repo } = parsed;
+    addLog(`Connecting to github.com/${owner}/${repo}...`, true);
+
+    let ghData;
+    try {
+      ghData = await fetchGithubData(owner, repo);
+      addLog(`✓ Repo fetched: ${ghData.repoData.full_name}`, true);
+      addLog(`✓ Language data: ${Object.keys(ghData.languages).join(", ") || "N/A"}`, true);
+      addLog(`✓ Files found: ${ghData.contents.length}`, true);
+      if (ghData.existingReadme) addLog(`✓ Existing README detected (will use as reference)`, true);
+    } catch (err) {
+      addLog(`ERROR: ${err.message}`, false);
+      setLoading(false);
+      return;
+    }
+
+    addLog("Sending to Claude API...", true);
+
+    const { repoData, contents, languages, existingReadme } = ghData;
+    const fileList = contents.map(f => `${f.type === "dir" ? "[dir]" : "[file]"} ${f.name}`).join("\n");
+    const langList = Object.entries(languages).map(([l, b]) => `${l}: ${b} bytes`).join(", ");
+
+    const prompt = `You are a professional technical writer. Generate a comprehensive, well-structured README.md for this GitHub repository.
+
+Repository Info:
+- Name: ${repoData.name}
+- Full Name: ${repoData.full_name}
+- Description: ${repoData.description || "No description provided"}
+- Stars: ${repoData.stargazers_count} | Forks: ${repoData.forks_count}
+- Language (primary): ${repoData.language || "Unknown"}
+- All Languages: ${langList || "Unknown"}
+- License: ${repoData.license?.name || "None"}
+- Topics: ${repoData.topics?.join(", ") || "None"}
+- Created: ${repoData.created_at?.slice(0, 10)}
+- Default Branch: ${repoData.default_branch}
+
+File/Folder Structure:
+${fileList}
+
+${existingReadme ? `Existing README (use as reference for accuracy):\n---\n${existingReadme.slice(0, 2000)}\n---` : ""}
+
+Generate a README.md with these sections (only include sections that make sense for this repo):
+1. A bold project title with a one-liner description
+2. Badges (shields.io style placeholders)
+3. Overview / What it does
+4. Features
+5. Tech Stack
+6. Installation & Setup
+7. Usage / Examples
+8. Project Structure (brief)
+9. Contributing
+10. License
+
+Use proper Markdown formatting. Be concise but informative. Return ONLY the raw markdown, no preamble.`;
+
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1000,
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+
+      const data = await res.json();
+      if (data.error) throw new Error(data.error.message);
+
+      const text = data.content?.find(b => b.type === "text")?.text || "";
+      setReadme(text);
+      addLog("✓ README generated successfully", false);
+      addLog(`Token usage: ${data.usage?.input_tokens}→${data.usage?.output_tokens}`, true);
+    } catch (err) {
+      addLog(`CLAUDE ERROR: ${err.message}`, false);
+    }
+
+    setLoading(false);
+  };
+
+  const copyToClipboard = () => {
+    navigator.clipboard.writeText(readme);
+    addLog("README copied to clipboard ✓", true);
+  };
+
+  return (
+    <div style={{
+      background: DARK,
+      minHeight: "100vh",
+      padding: 0,
+      fontFamily: "monospace",
+      display: "flex",
+      flexDirection: "column",
+    }}>
+      {/* Header */}
+      <div style={{
+        background: PANEL,
+        borderBottom: `1px solid ${BORDER}`,
+        padding: "12px 20px",
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+      }}>
+        <div style={{ display: "flex", gap: 6 }}>
+          {["#ff5f57", "#febc2e", "#28c840"].map(c => (
+            <div key={c} style={{ width: 12, height: 12, borderRadius: "50%", background: c }} />
+          ))}
+        </div>
+        <span style={{ color: GREEN, fontSize: 13, letterSpacing: 2, fontWeight: "bold" }}>
+          GITREADME-AI
+        </span>
+        <span style={{ color: DIM_GREEN, fontSize: 11, marginLeft: "auto" }}>
+          github → claude → readme
+        </span>
+      </div>
+
+      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+        {/* Left panel: input + log */}
+        <div style={{
+          width: 340,
+          minWidth: 300,
+          borderRight: `1px solid ${BORDER}`,
+          display: "flex",
+          flexDirection: "column",
+          padding: 16,
+          gap: 12,
+        }}>
+          <div>
+            <div style={{ color: DIM_GREEN, fontSize: 11, marginBottom: 6, letterSpacing: 1 }}>
+              REPOSITORY URL
+            </div>
+            <div style={{
+              display: "flex",
+              alignItems: "center",
+              background: PANEL,
+              border: `1px solid ${BORDER}`,
+              padding: "8px 10px",
+              gap: 6,
+            }}>
+              <span style={{ color: DIM_GREEN, fontSize: 12 }}>$</span>
+              <input
+                ref={inputRef}
+                value={url}
+                onChange={e => setUrl(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && generate()}
+                placeholder="https://github.com/owner/repo"
+                style={{
+                  flex: 1,
+                  background: "transparent",
+                  border: "none",
+                  outline: "none",
+                  color: GREEN,
+                  fontFamily: "monospace",
+                  fontSize: 12,
+                }}
+              />
+            </div>
+          </div>
+
+          <button
+            onClick={generate}
+            disabled={loading}
+            style={{
+              background: loading ? PANEL : GREEN,
+              color: loading ? DIM_GREEN : DARK,
+              border: `1px solid ${loading ? BORDER : GREEN}`,
+              padding: "10px 0",
+              fontFamily: "monospace",
+              fontWeight: "bold",
+              fontSize: 13,
+              cursor: loading ? "not-allowed" : "pointer",
+              letterSpacing: 2,
+              transition: "all 0.2s",
+            }}
+          >
+            {loading ? "GENERATING..." : "[ GENERATE README ]"}
+          </button>
+
+          {/* Log terminal */}
+          <div style={{
+            flex: 1,
+            background: PANEL,
+            border: `1px solid ${BORDER}`,
+            padding: "10px 12px",
+            overflowY: "auto",
+            minHeight: 200,
+          }} ref={logRef}>
+            <div style={{ color: DIM_GREEN, fontSize: 10, marginBottom: 8, letterSpacing: 1 }}>SYSTEM LOG</div>
+            {log.map((l, i) => (
+              <TerminalLine key={i} text={l.text} dim={l.dim} />
+            ))}
+            {loading && <div style={{ color: GREEN, fontFamily: "monospace", fontSize: 13 }}>
+              <span style={{ color: DIM_GREEN }}>{">"} </span>working <Cursor />
+            </div>}
+          </div>
+        </div>
+
+        {/* Right panel: README output */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          {/* Tab bar */}
+          <div style={{
+            borderBottom: `1px solid ${BORDER}`,
+            display: "flex",
+            alignItems: "center",
+            padding: "0 16px",
+            gap: 0,
+          }}>
+            {["raw", "preview"].map(t => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                style={{
+                  background: tab === t ? PANEL : "transparent",
+                  color: tab === t ? GREEN : DIM_GREEN,
+                  border: "none",
+                  borderBottom: tab === t ? `2px solid ${GREEN}` : "2px solid transparent",
+                  padding: "10px 18px",
+                  fontFamily: "monospace",
+                  fontSize: 12,
+                  cursor: "pointer",
+                  letterSpacing: 1,
+                }}
+              >
+                {t.toUpperCase()}
+              </button>
+            ))}
+            {readme && (
+              <button
+                onClick={copyToClipboard}
+                style={{
+                  marginLeft: "auto",
+                  background: "transparent",
+                  color: DIM_GREEN,
+                  border: `1px solid ${BORDER}`,
+                  padding: "5px 14px",
+                  fontFamily: "monospace",
+                  fontSize: 11,
+                  cursor: "pointer",
+                  letterSpacing: 1,
+                }}
+              >
+                [ COPY ]
+              </button>
+            )}
+          </div>
+
+          {/* Content */}
+          <div style={{
+            flex: 1,
+            overflowY: "auto",
+            padding: 20,
+            background: DARK,
+          }}>
+            {!readme && !loading && (
+              <div style={{ color: BORDER, fontFamily: "monospace", fontSize: 13, marginTop: 40, textAlign: "center" }}>
+                <div style={{ fontSize: 32, marginBottom: 12 }}>📄</div>
+                <div>Enter a GitHub repo URL and hit generate</div>
+                <div style={{ marginTop: 6, fontSize: 11, color: "#1a2e1a" }}>output appears here</div>
+              </div>
+            )}
+            {loading && !readme && (
+              <div style={{ color: DIM_GREEN, fontFamily: "monospace", fontSize: 13, marginTop: 40, textAlign: "center" }}>
+                <Cursor /> Fetching repo data and generating README...
+              </div>
+            )}
+            {readme && tab === "raw" && (
+              <textarea
+                value={readme}
+                onChange={e => setReadme(e.target.value)}
+                style={{
+                  width: "100%",
+                  minHeight: "calc(100vh - 140px)",
+                  background: PANEL,
+                  color: GREEN,
+                  border: `1px solid ${BORDER}`,
+                  fontFamily: "monospace",
+                  fontSize: 12,
+                  lineHeight: 1.8,
+                  padding: 16,
+                  resize: "none",
+                  outline: "none",
+                  boxSizing: "border-box",
+                }}
+              />
+            )}
+            {readme && tab === "preview" && (
+              <div style={{
+                background: PANEL,
+                border: `1px solid ${BORDER}`,
+                padding: 20,
+                minHeight: 200,
+              }}>
+                <MarkdownPreview md={readme} />
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
